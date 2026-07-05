@@ -533,20 +533,6 @@ def save_excel(df, audit_df, path):
     wb = openpyxl.load_workbook(path)
     ws = wb["Итог"]
 
-    # Цвета по ZONE_COLORS (текстовые коды)
-    zone_fills = {
-        ZONE_CODE_RED:    PatternFill("solid", fgColor="FECACA"),
-        ZONE_CODE_ORANGE: PatternFill("solid", fgColor="FDE68A"),
-        ZONE_CODE_GREEN:  PatternFill("solid", fgColor="BBF7D0"),
-        ZONE_CODE_NODATA: PatternFill("solid", fgColor="E5E7EB"),
-    }
-    quad_fills = {
-        "Приоритет 1 (низкий рейтинг + систематичность)": PatternFill("solid", fgColor="FECACA"),
-        "Приоритет 2 (высокий рейтинг + систематичность)": PatternFill("solid", fgColor="FDE68A"),
-        "Приоритет 3 (низкий рейтинг + нет систематичности)": PatternFill("solid", fgColor="BFDBFE"),
-        "Приоритет 4 (высокий рейтинг + нет систематичности)": PatternFill("solid", fgColor="BBF7D0"),
-    }
-
     header_fill = PatternFill("solid", fgColor="0F2D52")
     header_font = Font(color="FFFFFF", bold=True, size=11)
     for cell in ws[1]:
@@ -559,24 +545,13 @@ def save_excel(df, audit_df, path):
     for col_idx, width in col_widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    zone_col_idx = df_export.columns.get_loc("Зона риска") + 2 if "Зона риска" in df_export.columns else None
-    quad_col_idx = df_export.columns.get_loc("Квадрант") + 2 if "Квадрант" in df_export.columns else None
-    zone_code_col_idx = df.columns.get_loc("_zone_code") + 1 if "_zone_code" in df.columns else None
-
     thin = Side(style="thin", color="D1D5DB")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), start=1):
-        # Получаем zone_code из оригинального df
-        zone_code_val = df["_zone_code"].iloc[row_idx - 1] if zone_code_col_idx and row_idx <= len(df) else ZONE_CODE_NODATA
-        quad_val = row[quad_col_idx - 1].value if quad_col_idx else ""
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
         for cell in row:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border = border
-        if zone_col_idx:
-            row[zone_col_idx - 1].fill = zone_fills.get(zone_code_val, PatternFill())
-        if quad_col_idx:
-            row[quad_col_idx - 1].fill = quad_fills.get(quad_val, PatternFill())
 
     ws.row_dimensions[1].height = 42
     for i in range(2, ws.max_row + 1):
