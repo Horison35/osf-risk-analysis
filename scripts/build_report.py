@@ -41,21 +41,38 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ── СТИЛЬ (точно как в ipynb) ──────────────────────────────────────────────
+# ── СТИЛЬ ──────────────────────────────────────────────────────────────────
 INK   = "#0F2D52"
 SUB   = "#7C8DA6"
 GRID  = "#EEF2F7"
 FONT  = "Inter, Segoe UI, Roboto, Arial, sans-serif"
-ZONE_COLORS = {"🔴 КРАСНАЯ": "#DC2626", "🟠 ОРАНЖЕВАЯ": "#F59E0B", "🟢 ЗЕЛЁНАЯ": "#10B981"}
+
+# Текстовые коды зон (для логики, сортировки, фильтрации)
+ZONE_CODE_RED    = "RED"
+ZONE_CODE_ORANGE = "ORANGE"
+ZONE_CODE_GREEN  = "GREEN"
+ZONE_CODE_NODATA = "NO_DATA"
+
+# Эмодзи — только декор в Excel и дашборде
+ZONE_EMOJI = {"RED": "🔴", "ORANGE": "🟠", "GREEN": "🟢", "NO_DATA": "⚪"}
+
+# Для бар-графика и Excel (3 зоны):
+ZONE_COLORS = {"RED": "#DC2626", "ORANGE": "#F59E0B", "GREEN": "#10B981", "NO_DATA": "#94A3B8"}
+
+# Для матрицы квадрантов scatter (4 приоритета):
+QUADRANT_COLORS = {
+    "Приоритет 1 (низкий рейтинг + систематичность)": "#DC2626",
+    "Приоритет 2 (высокий рейтинг + систематичность)": "#F59E0B",
+    "Приоритет 3 (низкий рейтинг + нет систематичности)": "#3B82F6",
+    "Приоритет 4 (высокий рейтинг + нет систематичности)": "#10B981",
+}
+# Правило: scatter красится по QUADRANT_COLORS, бар и Excel — по ZONE_COLORS. Не смешивать.
+
+# Обратная совместимость для старых частей кода
 NO_DATA_ZONE = "⚪ НЕТ ДАННЫХ"
-ZONE_COLORS_FULL = {**ZONE_COLORS, NO_DATA_ZONE: "#94A3B8"}
+ZONE_COLORS_FULL = {"🔴 КРАСНАЯ": "#DC2626", "🟠 ОРАНЖЕВАЯ": "#F59E0B", "🟢 ЗЕЛЁНАЯ": "#10B981", NO_DATA_ZONE: "#94A3B8"}
 QUAD_COLORS = {
-    "Высокий рейтинг + Высокий риск":  "#DC2626",
-    "Низкий рейтинг + Высокий риск":   "#F59E0B",
-    "Высокий рейтинг + Низкий риск":   "#10B981",
-    "Низкий рейтинг + Низкий риск":    "#3B82F6",
-    "Высокий рейтинг + Риск неизвестен": "#64748B",
-    "Низкий рейтинг + Риск неизвестен":  "#94A3B8",
+    k: v for k, v in QUADRANT_COLORS.items()
 }
 
 CRITERIA = ["Стратегия", "План-график", "Регионы", "Сайт",
@@ -152,7 +169,8 @@ def load_osf_rating(pdf_path):
 # ШАГ 2. ИЗВЛЕЧЕНИЕ РИСКОВ ИЗ IPYNB
 # ══════════════════════════════════════════════════════════════════
 
-ZONE_ORDER = {"🔴 КРАСНАЯ": 0, "🟠 ОРАНЖЕВАЯ": 1, "🟢 ЗЕЛЁНАЯ": 2}
+ZONE_ORDER = {"🔴 КРАСНАЯ": 0, "🟠 ОРАНЖЕВАЯ": 1, "🟢 ЗЕЛЁНАЯ": 2,
+              "RED": 0, "ORANGE": 1, "GREEN": 2, "NO_DATA": 3}
 
 
 def load_risks_from_ipynb(ipynb_path):
@@ -386,55 +404,73 @@ def build_final_table(osf_df, risks_df):
         risk = osf_to_risk.get(osf_name)
 
         if risk is None:
-            # Нет данных модели — риск неизвестен
+            # Нет данных модели
+            zone_code = ZONE_CODE_NODATA
             zone  = NO_DATA_ZONE
             proba = np.nan
             reason = "Вид спорта отсутствует в прогнозной модели"
             if is_high_rat:
-                quadrant = "Высокий рейтинг + Риск неизвестен"
-                rec = "Мониторинг; собрать данные для оценки риска моделью"
+                priority = 4
+                quadrant = "Приоритет 4 (высокий рейтинг + нет систематичности)"
+                rec = "Поддерживать текущий уровень; мониторинг; плановые проверки"
             else:
-                quadrant = "Низкий рейтинг + Риск неизвестен"
-                rec = (f"Подтянуть рейтинг по критериям: {not_done_c if not_done_c else '—'}; "
-                       f"собрать данные для оценки риска")
-            justification = (f"Нет данных прогнозной модели по этому виду спорта. "
-                             f"Рейтинг РУСАДА: {rating} баллов."
-                             + (f" Невыполненные критерии: {not_done_c}." if not_done_c else ""))
+                priority = 3
+                quadrant = "Приоритет 3 (низкий рейтинг + нет систематичности)"
+                rec = "Продолжать профилактику; приоритизировать работу по невыполненным критериям рейтинга; превентивная работа с федерацией и регионом"
+            miss_str = not_done_c if not_done_c else "нет"
+            justification = (f"Данных модели нет; баллы рейтинга: {rating}/100"
+                             + (f"; невыполненные критерии: {miss_str}" if not_done_c else "; критерии рейтинга выполнены полностью"))
         else:
-            zone   = risk["зона_риска"]
+            zone_raw = risk["зона_риска"]
+            # Нормализуем зону к текстовому коду
+            if zone_raw in ("🔴 КРАСНАЯ", "RED"):
+                zone_code = ZONE_CODE_RED
+                zone = "🔴 RED"
+            elif zone_raw in ("🟠 ОРАНЖЕВАЯ", "ORANGE"):
+                zone_code = ZONE_CODE_ORANGE
+                zone = "🟠 ORANGE"
+            elif zone_raw in ("🟢 ЗЕЛЁНАЯ", "GREEN"):
+                zone_code = ZONE_CODE_GREEN
+                zone = "🟢 GREEN"
+            else:
+                zone_code = ZONE_CODE_NODATA
+                zone = "⚪ NO_DATA"
             proba  = risk["proba"]
             reason = risk["причина"]
-            is_high_risk = zone in ("🔴 КРАСНАЯ", "🟠 ОРАНЖЕВАЯ")
+            is_systematic = zone_code in (ZONE_CODE_RED, ZONE_CODE_ORANGE)
 
-            if is_high_rat and is_high_risk:
-                quadrant = "Высокий рейтинг + Высокий риск"
-                rec = ("Усилить антидопинговое образование; беседы с заинтересованными "
-                       "сторонами; рассмотреть внесоревновательное тестирование")
-            elif not is_high_rat and is_high_risk:
-                quadrant = "Низкий рейтинг + Высокий риск"
-                rec = (f"Приоритизировать работу по невыполненным критериям рейтинга: "
-                       f"{not_done_c if not_done_c else '—'}")
-            elif is_high_rat and not is_high_risk:
-                quadrant = "Высокий рейтинг + Низкий риск"
-                rec = "Поддерживать текущий уровень; регулярный мониторинг"
+            if not is_high_rat and is_systematic:
+                priority = 1
+                quadrant = "Приоритет 1 (низкий рейтинг + систематичность)"
+                rec = "Приоритизировать работу по невыполненным критериям рейтинга"
+            elif is_high_rat and is_systematic:
+                priority = 2
+                quadrant = "Приоритет 2 (высокий рейтинг + систематичность)"
+                rec = "Усилить антидопинговое образование; беседы с заинтересованными сторонами; рассмотреть внесоревновательное тестирование"
+            elif not is_high_rat and not is_systematic:
+                priority = 3
+                quadrant = "Приоритет 3 (низкий рейтинг + нет систематичности)"
+                rec = "Продолжать профилактику; приоритизировать работу по невыполненным критериям рейтинга; превентивная работа с федерацией и регионом"
             else:
-                quadrant = "Низкий рейтинг + Низкий риск"
-                rec = (f"Профилактическая работа; подтянуть рейтинг по критериям: "
-                       f"{not_done_c if not_done_c else '—'}")
+                priority = 4
+                quadrant = "Приоритет 4 (высокий рейтинг + нет систематичности)"
+                rec = "Поддерживать текущий уровень; мониторинг; плановые проверки"
 
-            if is_high_risk:
-                justification = (f"Рисковый ({zone}): {reason}. "
-                                 f"Невыполненные критерии рейтинга РУСАДА: "
-                                 f"{not_done_c if not_done_c else 'все выполнены'}.")
+            proba_str = f"{proba:.3f}" if proba == proba else "нет данных"
+            miss_str = not_done_c if not_done_c else "нет"
+            if is_systematic:
+                justification = (f"Рисковый из-за {reason} (зона {zone_code}, proba: {proba_str}); "
+                                 + (f"нехватка баллов по критериям: {miss_str}" if not_done_c else "критерии рейтинга выполнены полностью"))
             else:
-                justification = (f"Низкий риск (оценка модели: {proba:.2f}). "
-                                 f"Рейтинг: {rating} баллов."
-                                 + (f" Невыполненные критерии: {not_done_c}." if not_done_c else ""))
+                justification = (f"Низкий риск по модели (proba: {proba_str}); баллы рейтинга: {rating}/100"
+                                 + (f"; недостающие критерии: {miss_str}" if not_done_c else "; все критерии выполнены"))
 
         results.append({
             "Вид спорта (ОСФ)": osf_name,
-            "Квадрант (риск × рейтинг)": quadrant,
-            "Зона риска (модель)": zone,
+            "Приоритет": priority,
+            "Квадрант": quadrant,
+            "Зона риска": zone,
+            "_zone_code": zone_code,
             "Оценка риска (proba)": round(proba, 3) if proba == proba else None,
             "Баллы рейтинга РУСАДА": rating,
             "Место в рейтинге": osf["Место"] if pd.notna(osf["Место"]) else "",
@@ -446,14 +482,35 @@ def build_final_table(osf_df, risks_df):
 
     df_out = pd.DataFrame(results)
 
-    # Сортировка: 🔴→🟠→🟢→⚪ ; внутри по proba убыв., затем по рейтингу возр.
-    zone_ord = {"🔴 КРАСНАЯ": 0, "🟠 ОРАНЖЕВАЯ": 1, "🟢 ЗЕЛЁНАЯ": 2, NO_DATA_ZONE: 3}
-    df_out["_z"] = df_out["Зона риска (модель)"].map(zone_ord).fillna(4)
+    # Сортировка: приоритет → zone (RED=1, ORANGE=2, GREEN=3, NO_DATA=4) → proba убыв.
+    zone_sort = {ZONE_CODE_RED: 1, ZONE_CODE_ORANGE: 2, ZONE_CODE_GREEN: 3, ZONE_CODE_NODATA: 4}
+    df_out["_zone_sort"] = df_out["_zone_code"].map(zone_sort).fillna(4)
     df_out["_p"] = df_out["Оценка риска (proba)"].fillna(-1)
-    df_out = df_out.sort_values(["_z", "_p", "Баллы рейтинга РУСАДА"],
-                                ascending=[True, False, True])
-    df_out = df_out.drop(columns=["_z", "_p"]).reset_index(drop=True)
+    df_out = df_out.sort_values(["Приоритет", "_zone_sort", "_p"],
+                                ascending=[True, True, False])
+    df_out = df_out.drop(columns=["_zone_sort", "_p"]).reset_index(drop=True)
     df_out.insert(0, "№", range(1, len(df_out) + 1))
+
+    # ── САМОПРОВЕРКА (инварианты) ──────────────────────────────────────────
+    n_rating = len(osf_df)
+    n_matrix = len(df_out)
+    print(f"\n{'='*60}")
+    print("САМОПРОВЕРКА (инварианты)")
+    print(f"{'='*60}")
+    print(f"1. N_рейтинг={n_rating}, строк в матрице={n_matrix}: {'✓' if n_matrix == n_rating else '✗ ОШИБКА'}")
+    prio_sum = df_out["Приоритет"].count()
+    print(f"2. Сумма строк по приоритетам={prio_sum} (должно быть {n_matrix}): {'✓' if prio_sum == n_matrix else '✗ ОШИБКА'}")
+    zone_dist = df_out["_zone_code"].value_counts().to_dict()
+    print(f"3. Распределение по зонам: {zone_dist}")
+    prio_dist = df_out["Приоритет"].value_counts().sort_index().to_dict()
+    print(f"   Распределение по приоритетам: {prio_dist}")
+    # Проверка 4: RED/ORANGE не в приоритетах 3-4
+    bad4 = df_out[df_out["_zone_code"].isin([ZONE_CODE_RED, ZONE_CODE_ORANGE]) & df_out["Приоритет"].isin([3, 4])]
+    print(f"4. RED/ORANGE с приоритетами 3-4: {len(bad4)} (должно быть 0): {'✓' if len(bad4)==0 else '✗ ОШИБКА'}")
+    # Проверка 5: GREEN не в приоритетах 1-2
+    bad5 = df_out[df_out["_zone_code"] == ZONE_CODE_GREEN & df_out["Приоритет"].isin([1, 2])]
+    print(f"5. GREEN с приоритетами 1-2: {len(bad5)} (должно быть 0): {'✓' if len(bad5)==0 else '✗ ОШИБКА'}")
+    print(f"{'='*60}\n")
 
     audit_df = pd.DataFrame(audit)
     return df_out, audit_df
@@ -464,27 +521,30 @@ def build_final_table(osf_df, risks_df):
 # ══════════════════════════════════════════════════════════════════
 
 def save_excel(df, audit_df, path):
+    # Экспортируем без служебных колонок
+    export_cols = [c for c in df.columns if not c.startswith("_")]
+    df_export = df[export_cols].copy()
+
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
-        df.to_excel(xl, index=False, sheet_name="Матрица ОСФ")
+        df_export.to_excel(xl, index=False, sheet_name="Итог")
         if audit_df is not None and not audit_df.empty:
             audit_df.to_excel(xl, index=False, sheet_name="Аудит матчинга")
 
     wb = openpyxl.load_workbook(path)
-    ws = wb["Матрица ОСФ"]
+    ws = wb["Итог"]
 
+    # Цвета по ZONE_COLORS (текстовые коды)
     zone_fills = {
-        "🔴 КРАСНАЯ":   PatternFill("solid", fgColor="FECACA"),
-        "🟠 ОРАНЖЕВАЯ": PatternFill("solid", fgColor="FDE68A"),
-        "🟢 ЗЕЛЁНАЯ":   PatternFill("solid", fgColor="BBF7D0"),
-        NO_DATA_ZONE:   PatternFill("solid", fgColor="E5E7EB"),
+        ZONE_CODE_RED:    PatternFill("solid", fgColor="FECACA"),
+        ZONE_CODE_ORANGE: PatternFill("solid", fgColor="FDE68A"),
+        ZONE_CODE_GREEN:  PatternFill("solid", fgColor="BBF7D0"),
+        ZONE_CODE_NODATA: PatternFill("solid", fgColor="E5E7EB"),
     }
     quad_fills = {
-        "Высокий рейтинг + Высокий риск":   PatternFill("solid", fgColor="FECACA"),
-        "Низкий рейтинг + Высокий риск":    PatternFill("solid", fgColor="FDE68A"),
-        "Высокий рейтинг + Низкий риск":    PatternFill("solid", fgColor="BBF7D0"),
-        "Низкий рейтинг + Низкий риск":     PatternFill("solid", fgColor="BFDBFE"),
-        "Высокий рейтинг + Риск неизвестен":PatternFill("solid", fgColor="E5E7EB"),
-        "Низкий рейтинг + Риск неизвестен": PatternFill("solid", fgColor="F1F5F9"),
+        "Приоритет 1 (низкий рейтинг + систематичность)": PatternFill("solid", fgColor="FECACA"),
+        "Приоритет 2 (высокий рейтинг + систематичность)": PatternFill("solid", fgColor="FDE68A"),
+        "Приоритет 3 (низкий рейтинг + нет систематичности)": PatternFill("solid", fgColor="BFDBFE"),
+        "Приоритет 4 (высокий рейтинг + нет систематичности)": PatternFill("solid", fgColor="BBF7D0"),
     }
 
     header_fill = PatternFill("solid", fgColor="0F2D52")
@@ -499,20 +559,24 @@ def save_excel(df, audit_df, path):
     for col_idx, width in col_widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    zone_col_idx = df.columns.get_loc("Зона риска (модель)") + 2
-    quad_col_idx = df.columns.get_loc("Квадрант (риск × рейтинг)") + 2
+    zone_col_idx = df_export.columns.get_loc("Зона риска") + 2 if "Зона риска" in df_export.columns else None
+    quad_col_idx = df_export.columns.get_loc("Квадрант") + 2 if "Квадрант" in df_export.columns else None
+    zone_code_col_idx = df.columns.get_loc("_zone_code") + 1 if "_zone_code" in df.columns else None
 
     thin = Side(style="thin", color="D1D5DB")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        zone_val = row[zone_col_idx - 1].value
-        quad_val = row[quad_col_idx - 1].value
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), start=1):
+        # Получаем zone_code из оригинального df
+        zone_code_val = df["_zone_code"].iloc[row_idx - 1] if zone_code_col_idx and row_idx <= len(df) else ZONE_CODE_NODATA
+        quad_val = row[quad_col_idx - 1].value if quad_col_idx else ""
         for cell in row:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border = border
-        row[zone_col_idx - 1].fill = zone_fills.get(zone_val, PatternFill())
-        row[quad_col_idx - 1].fill = quad_fills.get(quad_val, PatternFill())
+        if zone_col_idx:
+            row[zone_col_idx - 1].fill = zone_fills.get(zone_code_val, PatternFill())
+        if quad_col_idx:
+            row[quad_col_idx - 1].fill = quad_fills.get(quad_val, PatternFill())
 
     ws.row_dimensions[1].height = 42
     for i in range(2, ws.max_row + 1):
@@ -544,12 +608,10 @@ def build_dashboard(df, path):
     df_all = df.copy()
     df_all["_short"] = df_all["Вид спорта (ОСФ)"].apply(_short_name)
 
-    df_risk = df_all[df_all["Зона риска (модель)"].isin(["🔴 КРАСНАЯ", "🟠 ОРАНЖЕВАЯ"])].copy()
+    df_risk = df_all[df_all["_zone_code"].isin([ZONE_CODE_RED, ZONE_CODE_ORANGE])].copy()
 
     # ── ГРАФИК 1: Матрица квадрантов (scatter) ──
-    quad_order = ["Высокий рейтинг + Высокий риск", "Низкий рейтинг + Высокий риск",
-                  "Высокий рейтинг + Низкий риск",  "Низкий рейтинг + Низкий риск",
-                  "Высокий рейтинг + Риск неизвестен", "Низкий рейтинг + Риск неизвестен"]
+    quad_order = list(QUADRANT_COLORS.keys())
 
     fig2 = go.Figure()
     rng = np.random.default_rng(42)
@@ -566,7 +628,7 @@ def build_dashboard(df, path):
         y = y + rng.uniform(-0.012, 0.012, size=len(y))
         fig2.add_trace(go.Scatter(
             x=x, y=y, mode="markers", name=quad,
-            marker=dict(color=QUAD_COLORS.get(quad, "#94A3B8"), size=12,
+            marker=dict(color=QUADRANT_COLORS.get(quad, "#94A3B8"), size=12,
                         opacity=0.82, line=dict(width=1, color="white")),
             customdata=np.stack([
                 sub["Вид спорта (ОСФ)"].values,
@@ -599,7 +661,7 @@ def build_dashboard(df, path):
         d1 = df_risk.sort_values("Оценка риска (proba)").tail(20).copy()
         fig1 = px.bar(
             d1, x="Оценка риска (proba)", y="_short", orientation="h",
-            color="Зона риска (модель)", color_discrete_map=ZONE_COLORS,
+            color="_zone_code", color_discrete_map=ZONE_COLORS,
             text=d1["Оценка риска (proba)"].map(lambda v: f"{v:.2f}"),
             hover_name="Вид спорта (ОСФ)",
             hover_data={"Баллы рейтинга РУСАДА": True, "Квадрант (риск × рейтинг)": True,
@@ -618,11 +680,11 @@ def build_dashboard(df, path):
         fig1.update_layout(height=300)
 
     # ── ГРАФИК 3: Распределение по квадрантам (pie) ──
-    quad_counts = df_all["Квадрант (риск × рейтинг)"].value_counts().reset_index()
+    quad_counts = df_all["Квадрант"].value_counts().reset_index()
     quad_counts.columns = ["Квадрант", "Кол-во"]
     fig3 = go.Figure(go.Pie(
         labels=quad_counts["Квадрант"], values=quad_counts["Кол-во"],
-        marker_colors=[QUAD_COLORS.get(q, "#94A3B8") for q in quad_counts["Квадрант"]],
+        marker_colors=[QUADRANT_COLORS.get(q, "#94A3B8") for q in quad_counts["Квадрант"]],
         textinfo="label+percent+value",
         hovertemplate="<b>%{label}</b><br>Федераций: %{value}<br>%{percent}<extra></extra>",
         hole=0.4, textfont=dict(size=11),
@@ -688,8 +750,8 @@ if __name__ == "__main__":
     print("🔗 Матчинг и сборка таблицы по всем ОСФ...")
     df_final, audit_df = build_final_table(osf_df, risks_df)
     print(f"   Итоговых строк (= всех ОСФ): {len(df_final)}")
-    for z in ["🔴 КРАСНАЯ", "🟠 ОРАНЖЕВАЯ", "🟢 ЗЕЛЁНАЯ", NO_DATA_ZONE]:
-        print(f"   {z}: {(df_final['Зона риска (модель)'] == z).sum()}")
+    for z in [ZONE_CODE_RED, ZONE_CODE_ORANGE, ZONE_CODE_GREEN, ZONE_CODE_NODATA]:
+        print(f"   {ZONE_EMOJI.get(z,'')} {z}: {(df_final['_zone_code'] == z).sum()}")
 
     excel_path = os.path.join(OUT_DIR, "osf_risk_final.xlsx")
     html_path  = os.path.join(OUT_DIR, "osf_risk_dashboard_final.html")
